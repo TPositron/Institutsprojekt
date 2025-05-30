@@ -4,10 +4,14 @@ import cv2
 import os
 import math
 
-def export_gds_structure(gds_path, cell_name, layers, bounds, output_path, target_size):
+def export_gds_structure(gds_path, cell_name, layers, bounds, output_path, target_size, rotation_degrees=0):
     """
-    Export GDS structure to PNG without stretching, maintaining aspect ratio
+    Export GDS structure to PNG with optional rotation, maintaining aspect ratio
     """
+    # Check if GDS file exists
+    if not os.path.exists(gds_path):
+        raise FileNotFoundError(f"GDS file not found: {gds_path}")
+    
     xmin, ymin, xmax, ymax = bounds
     gds_width = xmax - xmin
     gds_height = ymax - ymin
@@ -17,10 +21,18 @@ def export_gds_structure(gds_path, cell_name, layers, bounds, output_path, targe
     scaled_width = int(gds_width * scale)
     scaled_height = int(gds_height * scale)
     
-    # Create centered image
-    image = np.ones((target_size[1], target_size[0]), dtype=np.uint8) * 255
-    offset_x = (target_size[0] - scaled_width) // 2
-    offset_y = (target_size[1] - scaled_height) // 2
+    # Create centered image with extra space for rotation if needed
+    if abs(rotation_degrees) > 0.1:
+        # Create larger canvas to accommodate rotation
+        diagonal = int(math.sqrt(target_size[0]**2 + target_size[1]**2))
+        temp_size = (diagonal, diagonal)
+        image = np.ones(temp_size, dtype=np.uint8) * 255
+        temp_offset_x = (diagonal - scaled_width) // 2
+        temp_offset_y = (diagonal - scaled_height) // 2
+    else:
+        image = np.ones((target_size[1], target_size[0]), dtype=np.uint8) * 255
+        temp_offset_x = (target_size[0] - scaled_width) // 2
+        temp_offset_y = (target_size[1] - scaled_height) // 2
     
     # Load GDS and get polygons
     gds = gdspy.GdsLibrary().read_gds(gds_path)
@@ -37,11 +49,44 @@ def export_gds_structure(gds_path, cell_name, layers, bounds, output_path, targe
                     norm_poly = (poly - [xmin, ymin]) * scale
                     int_poly = np.round(norm_poly).astype(np.int32)
                     # Offset to center
-                    int_poly += [offset_x, offset_y]
+                    int_poly += [temp_offset_x, temp_offset_y]
                     cv2.fillPoly(image, [int_poly], color=0)
     
-    cv2.imwrite(output_path, image)
-    print(f"Saved: {output_path} ({scaled_width}x{scaled_height} content centered in {target_size[0]}x{target_size[1]})")
+    # Apply rotation if needed
+    if abs(rotation_degrees) > 0.1:
+        # Rotate the image
+        center = (image.shape[1] // 2, image.shape[0] // 2)
+        rotation_matrix = cv2.getRotationMatrix2D(center, rotation_degrees, 1.0)
+        rotated = cv2.warpAffine(image, rotation_matrix, (image.shape[1], image.shape[0]), 
+                                borderValue=255, flags=cv2.INTER_LINEAR)
+        
+        # Crop to target size from center
+        center_x, center_y = rotated.shape[1] // 2, rotated.shape[0] // 2
+        start_x = center_x - target_size[0] // 2
+        start_y = center_y - target_size[1] // 2
+        end_x = start_x + target_size[0]
+        end_y = start_y + target_size[1]
+        
+        # Ensure we don't go out of bounds
+        start_x = max(0, start_x)
+        start_y = max(0, start_y)
+        end_x = min(rotated.shape[1], end_x)
+        end_y = min(rotated.shape[0], end_y)
+        
+        final_image = rotated[start_y:end_y, start_x:end_x]
+        
+        # Pad if necessary to reach target size
+        if final_image.shape != (target_size[1], target_size[0]):
+            padded = np.ones((target_size[1], target_size[0]), dtype=np.uint8) * 255
+            paste_y = (target_size[1] - final_image.shape[0]) // 2
+            paste_x = (target_size[0] - final_image.shape[1]) // 2
+            padded[paste_y:paste_y+final_image.shape[0], paste_x:paste_x+final_image.shape[1]] = final_image
+            final_image = padded
+    else:
+        final_image = image
+    
+    cv2.imwrite(output_path, final_image)
+    print(f"Saved: {output_path} ({scaled_width}x{scaled_height} content, rotation={rotation_degrees}°, final size={target_size[0]}x{target_size[1]})")
 
 def find_optimal_bounds(polygons, initial_bounds, layers):
     """Find tight bounds around all polygons in specified layers"""
@@ -109,7 +154,7 @@ def process_structures():
         export_gds_structure(
             GDS_PATH, CELL_NAME, struct_data['layers'],
             struct_data['initial_bounds'], output_1024,
-            target_size=(1024, 1024)
+            target_size=(1024, 1024), rotation_degrees=0
         )
         
         # Version 2: Original 1024x666 (cropped height)
@@ -117,7 +162,7 @@ def process_structures():
         export_gds_structure(
             GDS_PATH, CELL_NAME, struct_data['layers'],
             struct_data['initial_bounds'], output_666,
-            target_size=(1024, 666)
+            target_size=(1024, 666), rotation_degrees=0 
         )
         
         # Version 3: Optimized bounds (centered, minimal background)
@@ -128,7 +173,7 @@ def process_structures():
         export_gds_structure(
             GDS_PATH, CELL_NAME, struct_data['layers'],
             optimal_bounds, output_opt,
-            target_size=(1024, 1024)
+            target_size=(1024, 1024), rotation_degrees=0  # Add this parameter
         )
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ import os
 import json
 from datetime import datetime
 from PIL import Image, ImageTk
+import tempfile
+import math
 
 # Import your modules
 from buttons import create_button_row
@@ -17,7 +19,7 @@ from transform_stretch import stretch_image, StretchTransformFrame
 from transform_zoom import zoom_image, ZoomTransformFrame
 from transform_transparency import TransparencyControlFrame
 from transformation_mirror import mirror_image
-
+from extract_gds import export_gds_structure
 
 class ManualAlignmentUI:
     def __init__(self, root):
@@ -82,10 +84,30 @@ class ManualAlignmentUI:
         btn_frame = ttk.Frame(file_frame)
         btn_frame.pack(fill=tk.X)
         
+        #SEM button        
         ttk.Button(btn_frame, text="Select SEM", 
                   command=self.select_sem_file).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(btn_frame, text="Select GDS", 
-                  command=self.select_gds_file).pack(side=tk.LEFT)
+        # GDS Structure Selection
+        gds_selection_frame = ttk.Frame(file_frame)
+        gds_selection_frame.pack(fill=tk.X, pady=(10, 0))
+
+        ttk.Label(gds_selection_frame, text="Select GDS Structure:").pack(anchor=tk.W)
+
+        # Dropdown for GDS structure selection
+        self.gds_structure_var = tk.StringVar(value="")
+        gds_options = [
+            ("Structure 1 - Circpol_T2", "1"),
+            ("Structure 2 - IP935Left_11", "2"), 
+            ("Structure 3 - IP935Left_14", "3"),
+            ("Structure 4 - QC855GC_CROSS_Bottom", "4"),
+            ("Structure 5 - QC935_46", "5")
+        ]
+
+        gds_dropdown = ttk.Combobox(gds_selection_frame, textvariable=self.gds_structure_var,
+                                values=[option[0] for option in gds_options],
+                                state="readonly", width=30)
+        gds_dropdown.pack(pady=(5, 0))
+        gds_dropdown.bind('<<ComboboxSelected>>', self.on_gds_structure_selected)
         
         # Transformation controls
         transform_frame = ttk.LabelFrame(parent, text="Transformations", padding="10")
@@ -146,17 +168,16 @@ class ManualAlignmentUI:
         ttk.Button(mirror_frame, text="Horizontal", command=self.toggle_mirror_horizontal).pack(side=tk.LEFT, padx=5)
         ttk.Button(mirror_frame, text="Vertical", command=self.toggle_mirror_vertical).pack(side=tk.LEFT, padx=5)
 
-        
         # Action buttons
         action_frame = ttk.Frame(parent)
         action_frame.pack(fill=tk.X, pady=(10, 0))
-        
+
         ttk.Button(action_frame, text="Reset All", 
-                  command=self.reset_transforms).pack(fill=tk.X, pady=(0, 5))
-        ttk.Button(action_frame, text="Save Transformation", 
-                  command=self.save_transformation).pack(fill=tk.X, pady=(0, 5))
+                command=self.reset_transforms).pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(action_frame, text="Generate Aligned GDS", 
+                command=self.save_transformation).pack(fill=tk.X, pady=(0, 5))
         ttk.Button(action_frame, text="Load Transformation", 
-                  command=self.load_transformation).pack(fill=tk.X)
+                command=self.load_transformation).pack(fill=tk.X)
         
     def setup_canvas_panel(self, parent):
         """Setup the canvas panel with zoom controls"""
@@ -197,38 +218,115 @@ class ManualAlignmentUI:
         """Load SEM image"""
         filename = filedialog.askopenfilename(
             title="Select SEM Image",
-            initialdir=self.sem_cropped_dir, #Anfang in sem Directory
+            initialdir=self.sem_cropped_dir,
             filetypes=[("Image files", "*.png *.jpg *.jpeg *.tiff *.bmp")]
         )
         if filename:
             self.original_sem = cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
             if self.original_sem is None:
                 messagebox.showerror("Error", "Failed to load SEM image")
+                return
+                
+            base_name = os.path.splitext(os.path.basename(filename))[0]
+            
+            # Update file pair name - preserve GDS structure info if already selected
+            if self.current_file_pair and "struct" in self.current_file_pair:
+                # Keep the structure info, update SEM part
+                struct_part = self.current_file_pair.split("_struct")[-1]
+                self.current_file_pair = f"{base_name}_struct{struct_part}"
             else:
-                base_name = os.path.splitext(os.path.basename(filename))[0]
                 self.current_file_pair = base_name
-                messagebox.showinfo("Success", f"Loaded SEM: {base_name}")
-                self.update_display()
-
-    def select_gds_file(self):
-        """Load GDS image"""
-        filename = filedialog.askopenfilename(
-            title="Select GDS Image",
-            initialdir=self.gds_object_dir, #start in gds directory
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.tiff *.bmp")]
-        )
-        if filename:
-            self.original_gds = cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
+                
+            messagebox.showinfo("Success", f"Loaded SEM: {base_name}")
+            self.update_display()
+    
+    def on_gds_structure_selected(self, event=None):
+        """Handle GDS structure selection from dropdown"""
+        selected_text = self.gds_structure_var.get()
+        if not selected_text:
+            return
+        
+        # Extract structure number from selection
+        structure_num = selected_text.split()[1]  # Gets "1", "2", etc.
+        # Store the current structure number for later use
+        self.current_structure_num = int(structure_num)
+        
+        try:
+            # Generate GDS image using extract_gds functions
+            print(f"Generating GDS structure {structure_num}...")
+            self.original_gds = self.generate_gds_preview(int(structure_num))
+            
             if self.original_gds is None:
-                messagebox.showerror("Error", "Failed to load GDS image")
+                messagebox.showerror("Error", "Failed to generate GDS preview")
+                return
+                
+            self.current_gds = self.original_gds.copy()
+            
+            # Update current_file_pair to include structure info
+            if self.current_file_pair:
+                # If SEM is already loaded, append structure info
+                self.current_file_pair = f"{self.current_file_pair}_struct{structure_num}"
             else:
-                self.current_gds = self.original_gds.copy()
-                if not self.current_file_pair:
-                    base_name = os.path.splitext(os.path.basename(filename))[0]
-                    self.current_file_pair = base_name
-                messagebox.showinfo("Success", "Loaded GDS image")
-                self.reset_transforms()
-
+                # If no SEM loaded yet, just use structure info
+                self.current_file_pair = f"structure{structure_num}"
+            
+            messagebox.showinfo("Success", f"Generated GDS Structure {structure_num}")
+            self.reset_transforms()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate GDS structure: {str(e)}")
+            print(f"Detailed error: {e}")
+    
+    def generate_gds_preview(self, structure_num):
+        """Generate GDS preview image for the selected structure"""
+        try:
+            # GDS file path - update this path as needed
+            GDS_PATH = "C:\\Users\\tarik\\Desktop\\Bildanalyse\\Data\\GDS\\Institute_Project_GDS1.gds"
+            CELL_NAME = "TOP"
+            
+            # Structure definitions (matching extract_gds.py)
+            structures = {
+                1: {'name': 'Circpol_T2', 'initial_bounds': (688.55, 5736.55, 760.55, 5807.1), 'layers': [14]},
+                2: {'name': 'IP935Left_11', 'initial_bounds': (693.99, 6406.40, 723.59, 6428.96), 'layers': [1, 2]},
+                3: {'name': 'IP935Left_14', 'initial_bounds': (980.959, 6025.959, 1001.770, 6044.979), 'layers': [1]},
+                4: {'name': 'QC855GC_CROSS_Bottom', 'initial_bounds': (3730.00, 4700.99, 3756.00, 4760.00), 'layers': [1, 2]},
+                5: {'name': 'QC935_46', 'initial_bounds': (7195.558, 5046.99, 7203.99, 5055.33964), 'layers': [1]}
+            }
+            
+            if structure_num not in structures:
+                raise ValueError(f"Structure {structure_num} not found")
+            
+            struct_data = structures[structure_num]
+            
+            # Create temporary file for the preview
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            try:
+                # Generate the GDS image using extract_gds function
+                export_gds_structure(
+                    GDS_PATH, CELL_NAME, struct_data['layers'],
+                    struct_data['initial_bounds'], temp_path,
+                    target_size=(1024, 1024)
+                )
+                
+                # Load the generated image
+                gds_image = cv2.imread(temp_path, cv2.IMREAD_GRAYSCALE)
+                
+                if gds_image is None:
+                    raise ValueError("Failed to load generated GDS image")
+                    
+                return gds_image
+                
+            finally:
+                # Always clean up temporary file
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                
+        except Exception as e:
+            print(f"Error generating GDS preview: {e}")
+            return None
+    
     def update_transform(self):
         """Update transformation parameters and apply to GDS image"""
         if self.original_gds is None:
@@ -236,6 +334,7 @@ class ManualAlignmentUI:
         
         try:
             # Get current parameter values
+            # Get current parameter values with validation
             self.transform_params = {
                 'move_x': self.move_x_var.get(),
                 'move_y': self.move_y_var.get(),
@@ -247,7 +346,14 @@ class ManualAlignmentUI:
                 'mirror_horizontal': self.transform_params.get('mirror_horizontal', False),
                 'mirror_vertical': self.transform_params.get('mirror_vertical', False)
             }
-            
+
+            # Validate parameters
+            validation_errors = self.validate_transformation_params()
+            if validation_errors:
+                print("Transformation validation warnings:")
+                for error in validation_errors:
+                    print(f"  - {error}")
+                        
             # Apply transformations sequentially
             transformed = self.original_gds.copy()
             
@@ -358,9 +464,9 @@ class ManualAlignmentUI:
             self.update_display()
     
     def save_transformation(self):
-        """Save transformation and create transformed images"""
-        if not self.current_file_pair:
-            messagebox.showwarning("Warning", "No images loaded")
+        """Save transformation and generate aligned GDS image"""
+        if not hasattr(self, 'current_structure_num') or not self.current_structure_num:
+            messagebox.showwarning("Warning", "No GDS structure selected")
             return
         
         if self.original_sem is None or self.current_gds is None:
@@ -368,76 +474,230 @@ class ManualAlignmentUI:
             return
         
         try:
-            output_name = f"{self.current_file_pair}_transformation"
+            # Get structure name for filename
+            structures = {
+                1: 'Circpol_T2',
+                2: 'IP935Left_11', 
+                3: 'IP935Left_14',
+                4: 'QC855GC_CROSS_Bottom',
+                5: 'QC935_46'
+            }
+            
+            structure_name = structures.get(self.current_structure_num, f"structure{self.current_structure_num}")
             
             # 1. Save transformation parameters
-            transform_file = os.path.join(self.output_dir, f"{output_name}.json")
+            transform_file = os.path.join(self.output_dir, f"{structure_name}_transformation.json")
             with open(transform_file, 'w') as f:
                 json.dump(self.transform_params, f, indent=2)
             
-            # 2. Apply inverse transformation to SEM (to align with transformed GDS)
-            transformed_sem = self.apply_inverse_transform_to_sem()
-            sem_output = os.path.join(self.output_dir, f"{self.current_file_pair}_aligned_sem.png")
-            cv2.imwrite(sem_output, transformed_sem)
-            
-            # 3. Create overlay with 30% GDS transparency
-            overlay_array = self.overlay_composer.compose(
-                transformed_sem, self.current_gds, transparency_percent=30
+            # 2. Generate and save pixel-aligned GDS image (1024x666)
+            aligned_gds_path, new_bounds = self.save_aligned_gds_image(
+                self.current_structure_num, 
+                target_size=(1024, 666)
             )
             
-            overlay_output = os.path.join(self.output_dir, f"{self.current_file_pair}_overlay.png")
-            cv2.imwrite(overlay_output, cv2.cvtColor(overlay_array, cv2.COLOR_RGB2BGR))
-            
-            messagebox.showinfo("Success", f"Saved:\n- {output_name}.json\n- {self.current_file_pair}_aligned_sem.png\n- {self.current_file_pair}_overlay.png")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save: {str(e)}")
-            
-    def apply_inverse_transform_to_sem(self):
-        """Apply inverse transformation to SEM image to align with transformed GDS"""
-        if self.original_sem is None:
-            return None
-        
-        try:
-            # Start with original SEM
-            transformed_sem = self.original_sem.copy()
-            
-            # Apply INVERSE transformations in REVERSE order
-            # 5. Inverse Mirror (same mirror operation to reverse since it's symmetric)
-            if self.transform_params['mirror_horizontal'] or self.transform_params['mirror_vertical']:
-                transformed_sem = mirror_image(transformed_sem,
-                                               horizontal=self.transform_params['mirror_horizontal'],
-                                               vertical=self.transform_params['mirror_vertical'])
+            if aligned_gds_path:
+                success_msg = f"Generated aligned GDS:\n"
+                success_msg += f"• {structure_name}_transformation.json\n"
+                success_msg += f"• {structure_name}_aligned_gds.png"
+                messagebox.showinfo("Success", success_msg)
+            else:
+                messagebox.showerror("Error", "Failed to generate aligned GDS")
                 
-            # 4. Inverse Move (opposite direction)
-            if self.transform_params['move_x'] != 0 or self.transform_params['move_y'] != 0:
-                transformed_sem = move_image(transformed_sem, 
-                                        -self.transform_params['move_x'],  # Negative
-                                        -self.transform_params['move_y'])  # Negative
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save transformation: {str(e)}")
+            print(f"Save error details: {e}")             
+    
+    def generate_aligned_gds_image(self, structure_num, target_size=(1024, 666)):
+        """
+        Generate a new GDS image that is pixel-aligned with the SEM image.
+        Takes transformation parameters and converts them back to GDS coordinates.
+        """
+        try:
+            # Structure definitions (same as in extract_gds.py)
+            structures = {
+                1: {'name': 'Circpol_T2', 'initial_bounds': (688.55, 5736.55, 760.55, 5807.1), 'layers': [14]},
+                2: {'name': 'IP935Left_11', 'initial_bounds': (693.99, 6406.40, 723.59, 6428.96), 'layers': [1, 2]},
+                3: {'name': 'IP935Left_14', 'initial_bounds': (980.959, 6025.959, 1001.770, 6044.979), 'layers': [1]},
+                4: {'name': 'QC855GC_CROSS_Bottom', 'initial_bounds': (3730.00, 4700.99, 3756.00, 4760.00), 'layers': [1, 2]},
+                5: {'name': 'QC935_46', 'initial_bounds': (7195.558, 5046.99, 7203.99, 5055.33964), 'layers': [1]}
+            }
             
-            # 3. Inverse Rotate (opposite angle)
-            if self.transform_params['rotation'] != 0.0:
-                transformed_sem = rotate_image(transformed_sem, -self.transform_params['rotation'])
+            if structure_num not in structures:
+                raise ValueError(f"Structure {structure_num} not found")
+                
+            struct_data = structures[structure_num]
+            original_bounds = struct_data['initial_bounds']
+            xmin_orig, ymin_orig, xmax_orig, ymax_orig = original_bounds
             
-            # 2. Inverse Stretch
-            if self.transform_params['stretch_x'] != 1.0 or self.transform_params['stretch_y'] != 1.0:
-                # Inverse of stretch is 1/stretch
-                inv_stretch_x = 1.0 / self.transform_params['stretch_x']
-                inv_stretch_y = 1.0 / self.transform_params['stretch_y']
-                transformed_sem = stretch_image(transformed_sem, inv_stretch_x, inv_stretch_y)
+            # Calculate original GDS dimensions and pixel scale for 1024x1024 reference
+            gds_width_orig = xmax_orig - xmin_orig
+            gds_height_orig = ymax_orig - ymin_orig
             
-            # 1. Inverse Zoom
-            if self.transform_params['zoom'] != 100:
-                # Inverse of zoom percentage
-                inv_zoom = 100 * (100.0 / self.transform_params['zoom'])
-                transformed_sem = zoom_image(transformed_sem, int(inv_zoom))
+            # Calculate scale factors based on original 1024x1024 image
+            scale_x_orig = gds_width_orig / 1024
+            scale_y_orig = gds_height_orig / 1024
             
-            return transformed_sem
+            # Calculate new bounds based on transformation parameters
+            new_bounds = self.calculate_transformed_gds_bounds(
+                original_bounds, scale_x_orig, scale_y_orig, target_size
+            )
+            
+            # Generate GDS image with new bounds and rotation
+            GDS_PATH = "C:\\Users\\tarik\\Desktop\\Bildanalyse\\Data\\GDS\\Institute_Project_GDS1.gds"
+            CELL_NAME = "TOP"
+            
+            # Create temporary file for the aligned GDS image
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            try:
+                # Generate the aligned GDS image WITH rotation applied
+                export_gds_structure(
+                    GDS_PATH, CELL_NAME, struct_data['layers'],
+                    new_bounds, temp_path, target_size=target_size,
+                    rotation_degrees=self.transform_params['rotation']  # Apply rotation directly
+                )
+                
+                # Load the generated image
+                aligned_gds = cv2.imread(temp_path, cv2.IMREAD_GRAYSCALE)
+                
+                if aligned_gds is None:
+                    raise ValueError("Failed to load generated aligned GDS image")
+                
+                print(f"Generated aligned GDS image:")
+                print(f"  Original bounds: {original_bounds}")
+                print(f"  New bounds: {new_bounds}")  
+                print(f"  Target size: {target_size}")
+                print(f"  Applied rotation: {self.transform_params['rotation']}°")
+                
+                return aligned_gds, new_bounds
+                
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    
+        except Exception as e:
+            print(f"Error generating aligned GDS image: {e}")
+            return None, None
+    
+    def calculate_transformed_gds_bounds(self, original_bounds, scale_x, scale_y, target_size):
+        """
+        Calculate new GDS bounds that account for ALL transformation parameters.
+        Applies INVERSE transformations to expand GDS bounds appropriately.
+        """
+        xmin_orig, ymin_orig, xmax_orig, ymax_orig = original_bounds
+        target_width, target_height = target_size
+        
+        # Original center in GDS coordinates
+        center_x_orig = (xmin_orig + xmax_orig) / 2
+        center_y_orig = (ymin_orig + ymax_orig) / 2
+        
+        # Original dimensions in GDS units
+        orig_width_gds = xmax_orig - xmin_orig
+        orig_height_gds = ymax_orig - ymin_orig
+        
+        # 1. Calculate inverse transformation factors
+        zoom_factor = self.transform_params['zoom'] / 100.0
+        zoom_inv = 1.0 / zoom_factor if zoom_factor > 0 else 1.0
+        
+        stretch_x_inv = 1.0 / self.transform_params['stretch_x'] if self.transform_params['stretch_x'] > 0 else 1.0
+        stretch_y_inv = 1.0 / self.transform_params['stretch_y'] if self.transform_params['stretch_y'] > 0 else 1.0
+        
+        # 2. Calculate effective scaling needed for target size
+        # We want the final image to be target_size, so work backwards
+        effective_scale_x = (target_width * scale_x * zoom_inv * stretch_x_inv) / orig_width_gds
+        effective_scale_y = (target_height * scale_y * zoom_inv * stretch_y_inv) / orig_height_gds
+        
+        # 3. Calculate new dimensions in GDS units
+        new_gds_width = orig_width_gds * effective_scale_x
+        new_gds_height = orig_height_gds * effective_scale_y
+        
+        # 4. Account for pixel movement (convert to GDS coordinates)
+        move_x_gds = -self.transform_params['move_x'] * scale_x * zoom_inv
+        move_y_gds = -self.transform_params['move_y'] * scale_y * zoom_inv
+        
+        # 5. Account for rotation by expanding bounds
+        rotation_rad = math.radians(abs(self.transform_params['rotation']))
+        if abs(self.transform_params['rotation']) > 0.1:
+            # Calculate bounding box expansion for rotation
+            cos_rot = abs(math.cos(rotation_rad))
+            sin_rot = abs(math.sin(rotation_rad))
+            
+            # Rotated bounding box dimensions
+            rotated_width = new_gds_width * cos_rot + new_gds_height * sin_rot
+            rotated_height = new_gds_width * sin_rot + new_gds_height * cos_rot
+            
+            new_gds_width = rotated_width
+            new_gds_height = rotated_height
+        
+        # 6. Calculate new center (offset by inverse movement)
+        new_center_x = center_x_orig + move_x_gds
+        new_center_y = center_y_orig + move_y_gds
+        
+        # 7. Calculate final bounds
+        new_xmin = new_center_x - new_gds_width / 2
+        new_xmax = new_center_x + new_gds_width / 2  
+        new_ymin = new_center_y - new_gds_height / 2
+        new_ymax = new_center_y + new_gds_height / 2
+        
+        # 8. Add safety margin (2% of original dimensions)
+        margin_x = orig_width_gds * 0.02
+        margin_y = orig_height_gds * 0.02
+        
+        final_bounds = (
+            new_xmin - margin_x,
+            new_ymin - margin_y, 
+            new_xmax + margin_x,
+            new_ymax + margin_y
+        )
+        
+        print(f"GDS Bounds Calculation:")
+        print(f"  Original: {original_bounds}")
+        print(f"  Transform params: move=({self.transform_params['move_x']}, {self.transform_params['move_y']}), "
+            f"zoom={self.transform_params['zoom']}%, stretch=({self.transform_params['stretch_x']}, {self.transform_params['stretch_y']}), "
+            f"rotation={self.transform_params['rotation']}°")
+        print(f"  Final bounds: {final_bounds}")
+        
+        return final_bounds
+    
+    def save_aligned_gds_image(self, structure_num, target_size=(1024, 666)):
+        """
+        Generate and save a pixel-aligned GDS image that matches the SEM alignment.
+        """
+        try:
+            # Structure name mapping
+            structure_names = {
+                1: 'Circpol_T2',
+                2: 'IP935Left_11', 
+                3: 'IP935Left_14',
+                4: 'QC855GC_CROSS_Bottom',
+                5: 'QC935_46'
+            }
+            
+            structure_name = structure_names.get(structure_num, f"structure{structure_num}")
+            
+            # Generate the aligned GDS image
+            aligned_gds, new_bounds = self.generate_aligned_gds_image(structure_num, target_size)
+            
+            if aligned_gds is None:
+                print("Failed to generate aligned GDS image")
+                return None, None
+            
+            # Save the aligned GDS image with structure name
+            output_path = os.path.join(self.output_dir, f"{structure_name}_aligned_gds.png")
+            cv2.imwrite(output_path, aligned_gds)
+            
+            print(f"Saved aligned GDS image: {output_path}")
+            print(f"New GDS bounds: {new_bounds}")
+            
+            return output_path, new_bounds
             
         except Exception as e:
-            print(f"Error applying inverse transform to SEM: {e}")
-            return self.original_sem.copy()  # Return original if transformation fails
-
+            print(f"Failed to save aligned GDS: {str(e)}")
+            return None, None
+    
     def is_identity_transform(self):
         """Check if current transformation is essentially identity (no change)"""
         return (abs(self.transform_params['move_x']) < 1 and
@@ -446,65 +706,77 @@ class ManualAlignmentUI:
                 abs(self.transform_params['stretch_x'] - 1.0) < 0.01 and
                 abs(self.transform_params['stretch_y'] - 1.0) < 0.01 and
                 abs(self.transform_params['zoom'] - 100) < 1)
+  
+    def validate_transformation_params(self):
+        """Validate that transformation parameters are within acceptable ranges"""
+        validation_errors = []
+        
+        # Check rotation bounds
+        if not (-90 <= self.transform_params['rotation'] <= 90):
+            validation_errors.append(f"Rotation {self.transform_params['rotation']}° is outside valid range (-90° to +90°)")
+        
+        # Check stretch bounds
+        if not (0.1 <= self.transform_params['stretch_x'] <= 3.0):
+            validation_errors.append(f"Stretch X {self.transform_params['stretch_x']} is outside valid range (0.1 to 3.0)")
+        
+        if not (0.1 <= self.transform_params['stretch_y'] <= 3.0):
+            validation_errors.append(f"Stretch Y {self.transform_params['stretch_y']} is outside valid range (0.1 to 3.0)")
+        
+        # Check zoom bounds
+        if not (10 <= self.transform_params['zoom'] <= 300):
+            validation_errors.append(f"Zoom {self.transform_params['zoom']}% is outside valid range (10% to 300%)")
+        
+        # Check transparency bounds
+        if not (0 <= self.transform_params['transparency'] <= 100):
+            validation_errors.append(f"Transparency {self.transform_params['transparency']}% is outside valid range (0% to 100%)")
+        
+        return validation_errors
     
     def load_transformation(self):
         """Load transformation parameters from file"""
-        if not self.current_file_pair:
-            messagebox.showwarning("Warning", "No file pair loaded")
+        if not hasattr(self, 'current_structure_num') or not self.current_structure_num:
+            messagebox.showwarning("Warning", "No GDS structure selected")
             return
         
         try:
-            # Try to load simple parameters first
-            simple_file = os.path.join(self.output_dir, f"{self.current_file_pair}_params.json")
-            transform_file = os.path.join(self.output_dir, f"{self.current_file_pair}_transform.json")
+            # Get structure name
+            structures = {
+                1: 'Circpol_T2',
+                2: 'IP935Left_11', 
+                3: 'IP935Left_14',
+                4: 'QC855GC_CROSS_Bottom',
+                5: 'QC935_46'
+            }
             
-            params = None
+            structure_name = structures.get(self.current_structure_num, f"structure{self.current_structure_num}")
             
-            # Try simple file first
-            if os.path.exists(simple_file):
-                with open(simple_file, 'r') as f:
-                    params = json.load(f)
-            # Fall back to detailed transform file
-            elif os.path.exists(transform_file):
-                with open(transform_file, 'r') as f:
-                    data = json.load(f)
-                    if 'transformations' in data:
-                        # Convert from detailed format
-                        t = data['transformations']
-                        params = {
-                            'move_x': t.get('move_x_pixels', 0),
-                            'move_y': t.get('move_y_pixels', 0),
-                            'rotation': t.get('rotation_degrees', 0.0),
-                            'stretch_x': t.get('stretch_x_factor', 1.0),
-                            'stretch_y': t.get('stretch_y_factor', 1.0),
-                            'zoom': t.get('zoom_percent', 100),
-                            'transparency': t.get('transparency_percent', 70)
-                        }
-                    else:
-                        params = data  # Old format
-            else:
-                messagebox.showwarning("Warning", "No saved transformation found for this file pair")
+            # Try to load transformation file
+            transform_file = os.path.join(self.output_dir, f"{structure_name}_transformation.json")
+            
+            if not os.path.exists(transform_file):
+                messagebox.showwarning("Warning", f"No saved transformation found for {structure_name}")
                 return
             
-            if params:
-                # Set UI variables
-                self.move_x_var.set(params.get('move_x', 0))
-                self.move_y_var.set(params.get('move_y', 0))
-                self.rotation_var.set(params.get('rotation', 0.0))
-                self.stretch_x_var.set(params.get('stretch_x', 1.0))
-                self.stretch_y_var.set(params.get('stretch_y', 1.0))
-                self.zoom_var.set(params.get('zoom', 100))
-                self.transparency_var.set(params.get('transparency', 70))
-                
-                # Apply transformations
-                self.update_transform()
-                
-                messagebox.showinfo("Success", f"Transformation loaded for {self.current_file_pair}")
+            with open(transform_file, 'r') as f:
+                params = json.load(f)
+            
+            # Set UI variables
+            self.move_x_var.set(params.get('move_x', 0))
+            self.move_y_var.set(params.get('move_y', 0))
+            self.rotation_var.set(params.get('rotation', 0.0))
+            self.stretch_x_var.set(params.get('stretch_x', 1.0))
+            self.stretch_y_var.set(params.get('stretch_y', 1.0))
+            self.zoom_var.set(params.get('zoom', 100))
+            self.transparency_var.set(params.get('transparency', 40))
+            
+            # Update transform_params and apply transformations
+            self.update_transform()
+            
+            messagebox.showinfo("Success", f"Transformation loaded for {structure_name}")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load transformation: {str(e)}")
             print(f"Load error details: {e}")
-
 
 def main():
     root = tk.Tk()
@@ -514,3 +786,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+ 
